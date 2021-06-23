@@ -48,7 +48,7 @@ ls(char *path)
 
   case T_DIR:
     if(strlen(path) + 1 + DIRSIZ + 1 > sizeof buf){
-      printf("ls: path too long\n");
+      printf("find: path too long\n");
       break;
     }
     strcpy(buf, path);
