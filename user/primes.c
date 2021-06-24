@@ -30,7 +30,7 @@ void nextprocess(int *p, int init) {
         // close p0 and print 2 when at the start
         printf("prime 2\n");
     }
-    while (1) {
+    for(;;) {
         if (init) {
             ++n;
             if (n > 35) {
