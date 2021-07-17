@@ -15,6 +15,10 @@ extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[]; // trampoline.S
 
+extern int copyin_new(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len);
+
+extern int copyinstr_new(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max);
+
 /*
  * create a direct-map page table for the kernel.
  */
@@ -31,7 +35,7 @@ kvminit()
   kvmmap(VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
 
   // CLINT
-  kvmmap(CLINT, CLINT, 0x10000, PTE_R | PTE_W);
+  // kvmmap(CLINT, CLINT, 0x10000, PTE_R | PTE_W);
 
   // PLIC
   kvmmap(PLIC, PLIC, 0x400000, PTE_R | PTE_W);
@@ -71,7 +75,7 @@ ukvminit(pagetable_t pagetable)
   ukvmmap(pagetable, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
 
   // CLINT
-  ukvmmap(pagetable, CLINT, CLINT, 0x10000, PTE_R | PTE_W);
+  // ukvmmap(pagetable, CLINT, CLINT, 0x10000, PTE_R | PTE_W);
 
   // PLIC
   ukvmmap(pagetable, PLIC, PLIC, 0x400000, PTE_R | PTE_W);
@@ -111,6 +115,14 @@ ukvmfree(pagetable_t pagetable)
   ukfreewalk(pagetable, 0);  
 }
 
+// add a mapping to the user's copy of kernel page table
+void
+ukvmmap(pagetable_t pagetable, uint64 va, uint64 pa, uint64 sz, int perm)
+{
+  if (mappages(pagetable, va, sz, pa, perm) != 0)
+    panic("ukvmmap");
+}
+
 // Return the address of the PTE in page table pagetable
 // that corresponds to virtual address va.  If alloc!=0,
 // create any required page-table pages.
@@ -141,6 +153,26 @@ walk(pagetable_t pagetable, uint64 va, int alloc)
     }
   }
   return &pagetable[PX(0, va)];
+}
+
+// copy user page table into process's kernel page table
+void
+ukvmcopy(pagetable_t pagetable, pagetable_t kpagetable, uint64 oldsz, uint64 newsz)
+{
+  uint64 a;
+  pte_t *upte, *kpte;
+
+  if(newsz < oldsz)
+    return;
+
+  a = PGROUNDUP(oldsz);
+  for(a = oldsz; a < newsz; a += PGSIZE) {
+    if ((upte = walk(pagetable, a, 0)) == 0)
+      panic("ukvmcopy: pte not found");
+    if ((kpte = walk(kpagetable, a, 1)) == 0)
+      panic("ukvmcopy: fail walk in kernel pg table");
+    *kpte = ((*upte) & (~PTE_U)); 
+  }
 }
 
 // Look up a virtual address, return the physical address,
@@ -174,14 +206,6 @@ kvmmap(uint64 va, uint64 pa, uint64 sz, int perm)
 {
   if(mappages(kernel_pagetable, va, sz, pa, perm) != 0)
     panic("kvmmap");
-}
-
-// add a mapping to the user's copy of kernel page table
-void
-ukvmmap(pagetable_t pagetable, uint64 va, uint64 pa, uint64 sz, int perm)
-{
-  if (mappages(pagetable, va, sz, pa, perm) != 0)
-    panic("ukvmmap");
 }
 
 // translate a kernel virtual address to
@@ -444,23 +468,7 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 int
 copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 {
-  uint64 n, va0, pa0;
-
-  while(len > 0){
-    va0 = PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
-    n = PGSIZE - (srcva - va0);
-    if(n > len)
-      n = len;
-    memmove(dst, (void *)(pa0 + (srcva - va0)), n);
-
-    len -= n;
-    dst += n;
-    srcva = va0 + PGSIZE;
-  }
-  return 0;
+  return copyin_new(pagetable, dst, srcva, len);
 }
 
 // Copy a null-terminated string from user to kernel.
@@ -470,40 +478,7 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 int
 copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 {
-  uint64 n, va0, pa0;
-  int got_null = 0;
-
-  while(got_null == 0 && max > 0){
-    va0 = PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
-    n = PGSIZE - (srcva - va0);
-    if(n > max)
-      n = max;
-
-    char *p = (char *) (pa0 + (srcva - va0));
-    while(n > 0){
-      if(*p == '\0'){
-        *dst = '\0';
-        got_null = 1;
-        break;
-      } else {
-        *dst = *p;
-      }
-      --n;
-      --max;
-      p++;
-      dst++;
-    }
-
-    srcva = va0 + PGSIZE;
-  }
-  if(got_null){
-    return 0;
-  } else {
-    return -1;
-  }
+  return copyinstr_new(pagetable, dst, srcva, max);
 }
 
 void 
