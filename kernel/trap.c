@@ -77,8 +77,12 @@ usertrap(void)
     exit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
+  if(which_dev == 2) {
+    if (p->alarmt > 0) {
+      p->nticks = p->nticks + 1;
+    }  
     yield();
+  }
 
   usertrapret();
 }
@@ -116,7 +120,44 @@ usertrapret(void)
   w_sstatus(x);
 
   // set S Exception Program Counter to the saved user pc.
-  w_sepc(p->trapframe->epc);
+  if (p->alarmt > 0 && p->alarmt == p->nticks && p->anret == 0) {
+    p->anret = 1;
+    w_sepc(p->ahandler);
+    p->atrapframe->ra = p->trapframe->ra;
+    p->atrapframe->sp = p->trapframe->sp;
+    p->atrapframe->gp = p->trapframe->gp;
+    p->atrapframe->tp = p->trapframe->tp;
+    p->atrapframe->t0 = p->trapframe->t0;
+    p->atrapframe->t1 = p->trapframe->t1;
+    p->atrapframe->t2 = p->trapframe->t2;
+    p->atrapframe->s0 = p->trapframe->s0;
+    p->atrapframe->s1 = p->trapframe->s1;
+    p->atrapframe->a0 = p->trapframe->a0;
+    p->atrapframe->a1 = p->trapframe->a1;
+    p->atrapframe->a2 = p->trapframe->a2;
+    p->atrapframe->a3 = p->trapframe->a3;
+    p->atrapframe->a4 = p->trapframe->a4;
+    p->atrapframe->a5 = p->trapframe->a5;
+    p->atrapframe->a6 = p->trapframe->a6;
+    p->atrapframe->a7 = p->trapframe->a7;
+    p->atrapframe->s2 = p->trapframe->s2;
+    p->atrapframe->s3 = p->trapframe->s3;
+    p->atrapframe->s4 = p->trapframe->s4;
+    p->atrapframe->s5 = p->trapframe->s5;
+    p->atrapframe->s6 = p->trapframe->s6;
+    p->atrapframe->s7 = p->trapframe->s7;
+    p->atrapframe->s8 = p->trapframe->s8;
+    p->atrapframe->s9 = p->trapframe->s9;
+    p->atrapframe->s10 = p->trapframe->s10;
+    p->atrapframe->s11 = p->trapframe->s11;
+    p->atrapframe->t3 = p->trapframe->t3;
+    p->atrapframe->t4 = p->trapframe->t4;
+    p->atrapframe->t5 = p->trapframe->t5;
+    p->atrapframe->t6 = p->trapframe->t6;
+    p->atrapframe->epc = p->trapframe->epc;
+  } else {
+    w_sepc(p->trapframe->epc);
+  }
 
   // tell trampoline.S the user page table to switch to.
   uint64 satp = MAKE_SATP(p->pagetable);
