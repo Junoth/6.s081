@@ -23,10 +23,14 @@ struct {
   struct run *freelist;
 } kmem;
 
+int ref[PGROUNDUP(PHYSTOP) / PGSIZE];
+
 void
 kinit()
 {
   initlock(&kmem.lock, "kmem");
+  for (int i = 0; i < PGROUNDUP(PHYSTOP) / PGSIZE; ++i)
+    ref[i] = 1;
   freerange(end, (void*)PHYSTOP);
 }
 
@@ -51,14 +55,15 @@ kfree(void *pa)
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
 
-  // Fill with junk to catch dangling refs.
-  memset(pa, 1, PGSIZE);
-
   r = (struct run*)pa;
 
   acquire(&kmem.lock);
-  r->next = kmem.freelist;
-  kmem.freelist = r;
+  ref[(uint64)pa / PGSIZE]--;
+  if (ref[(uint64)pa / PGSIZE] == 0) {
+    // only free the page when ref count is 0 
+    r->next = kmem.freelist;
+    kmem.freelist = r;
+  }
   release(&kmem.lock);
 }
 
@@ -74,9 +79,29 @@ kalloc(void)
   r = kmem.freelist;
   if(r)
     kmem.freelist = r->next;
+  // if (ref[pa / PGSIZE] != 0) {
+  //   printf("%d\n", ref[pa / PGSIZE]);
+  //   panic("kalloc");
+  // }
+  ref[(uint64)r / PGSIZE] = 1;
   release(&kmem.lock);
 
   if(r)
     memset((char*)r, 5, PGSIZE); // fill with junk
   return (void*)r;
+}
+
+void
+krefadd(void *pa)
+{
+  uint64 addr;
+  if((char*)pa < end || (uint64)pa >= PHYSTOP)
+    panic("krefadd");
+  
+  addr = (uint64)pa; 
+  addr = PGROUNDUP(addr); 
+
+  acquire(&kmem.lock);
+  ref[addr / PGSIZE]++; 
+  release(&kmem.lock); 
 }

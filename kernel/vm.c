@@ -111,6 +111,52 @@ walkaddr(pagetable_t pagetable, uint64 va)
   return pa;
 }
 
+uint64
+getcow(pagetable_t pagetable, uint64 va)
+{
+  pte_t *pte;
+  uint64 pa;
+  int flags, i;
+  void *mem;
+  char *ptr, *old_ptr;
+  
+  if (va >= MAXVA)
+    return 0;
+  
+  pte = walk(pagetable, va, 0);
+  if(pte == 0)
+    return 0;
+  if((*pte & PTE_V) == 0)
+    return 0;
+  if((*pte & PTE_U) == 0)
+    return 0;
+  if((*pte & PTE_C) == 0)
+    return PTE2PA(*pte);
+  
+  mem = kalloc();
+  if (mem == 0)
+    return 0;
+  
+  // copy old page content
+  ptr = (char*)mem;
+  old_ptr = (char*)(PTE2PA(*pte));
+  for (i = 0; i < PGSIZE; ++i) {
+    *(ptr + i) = *(old_ptr + i);
+  }
+
+  flags = (PTE_FLAGS(*pte) & (~PTE_C)) | PTE_W;
+
+  // try to free physical address
+  pa = PTE2PA(*pte);
+  kfree((void*)pa);
+
+  // update pte
+  pa = (uint64)mem;
+  *pte = PA2PTE(pa) | flags | PTE_V;
+
+  return (uint64)mem;
+}
+
 // add a mapping to the kernel page table.
 // only used when booting.
 // does not flush TLB or enable paging.
@@ -311,27 +357,44 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
-  for(i = 0; i < sz; i += PGSIZE){
+  // for(i = 0; i < sz; i += PGSIZE){
+  //   if((pte = walk(old, i, 0)) == 0)
+  //     panic("uvmcopy: pte should exist");
+  //   if((*pte & PTE_V) == 0)
+  //     panic("uvmcopy: page not present");
+  //   pa = PTE2PA(*pte);
+  //   flags = PTE_FLAGS(*pte);
+  //   if((mem = kalloc()) == 0)
+  //     goto err;
+  //   memmove(mem, (char*)pa, PGSIZE);
+  //   if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
+  //     kfree(mem);
+  //     goto err;
+  //   }
+  // }
+
+  // instead of allocating new pages, only add mappings to child page table
+  for (i = 0; i < sz; i += PGSIZE) {
     if((pte = walk(old, i, 0)) == 0)
       panic("uvmcopy: pte should exist");
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
+    flags = (PTE_FLAGS(*pte) & (~PTE_W)) | PTE_C;
     pa = PTE2PA(*pte);
-    flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+    // add mapping to new page
+    if (mappages(new, i, PGSIZE, pa, flags) != 0) {
       goto err;
     }
+    // incr ref count
+    krefadd((void*)pa);
+    // clear PTE_W flag
+    *pte = PA2PTE(pa) | flags | PTE_V; 
   }
   return 0;
 
  err:
-  uvmunmap(new, 0, i / PGSIZE, 1);
+  uvmunmap(new, 0, i / PGSIZE, 0);
   return -1;
 }
 
@@ -358,7 +421,7 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
-    pa0 = walkaddr(pagetable, va0);
+    pa0 = getcow(pagetable, va0);
     if(pa0 == 0)
       return -1;
     n = PGSIZE - (dstva - va0);
