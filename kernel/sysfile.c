@@ -333,6 +333,38 @@ sys_open(void)
   if(ip->type == T_DEVICE){
     f->type = FD_DEVICE;
     f->major = ip->major;
+  } else if(ip->type == T_SYMLINK && ((omode & O_NOFOLLOW) == 0)) {
+    // follow the symbolic
+    char target[MAXPATH];
+    int len, valid = 0;
+    for (int i = 0; i < 10; ++i) {
+      if ((len = readi(ip, 0, (uint64)target, 0, MAXPATH)) == 0) {
+        // fail to read the target path
+        iunlockput(ip);
+        end_op();
+        return -1;
+      }
+      // try to get ip from target path
+      iunlockput(ip);
+      if ((ip = namei(target)) == 0) {
+        end_op();
+        return -1;
+      }
+      ilock(ip);
+      if (ip->type != T_SYMLINK) {
+        f->type = ip->type;
+        f->off = 0;
+        valid = 1;
+        break;
+      }
+    } 
+
+    // circular link
+    if (!valid) {
+      iunlockput(ip);
+      end_op();
+      return -1;
+    }
   } else {
     f->type = FD_INODE;
     f->off = 0;
@@ -483,4 +515,56 @@ sys_pipe(void)
     return -1;
   }
   return 0;
+}
+
+uint64
+sys_symlink(void)
+{
+  char name[DIRSIZ], target[MAXPATH], path[MAXPATH];
+  struct inode *dp, *ip;
+  int len, n;
+
+  if(argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0)
+    return -1;
+
+  begin_op();
+
+  if ((dp = nameiparent(path, name)) == 0)
+    return -1;
+
+  // we need to get a new inum
+  if ((ip = ialloc(dp->dev, T_SYMLINK)) == 0)
+    return -1;
+  // write target path name into inode
+  ilock(ip);
+  ip->major = dp->major;
+  ip->minor = dp->minor;
+  ip->nlink = 1;
+  len = strlen(target);
+  if((n = writei(ip, 0, (uint64)target, 0, len)) != len)
+    goto bad;
+  iupdate(ip);
+  iunlock(ip);
+
+  ilock(dp);
+
+  // add dirent into dir
+  if (dirlink(dp, name, ip->inum) < 0) {
+    iunlockput(dp);
+    goto bad;
+  }
+  iunlockput(dp);
+  iput(ip);
+
+  end_op();
+
+  return 0;
+
+bad:
+  ilock(ip);
+  ip->nlink--;
+  iupdate(ip);
+  iunlockput(ip);
+  end_op();
+  return -1;
 }
