@@ -5,6 +5,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fcntl.h"
 
 struct cpu cpus[NCPU];
 
@@ -274,12 +275,27 @@ fork(void)
     return -1;
   }
 
+  // we need to increment the ref count
+  for (int i = 0; i < 16; ++i) {
+    struct vma *vma = &p->vmatable[i];
+    struct vma *nvma = &np->vmatable[i];
+    if (vma->alloc != 0) {
+      nvma->alloc = 1;
+      nvma->addr = vma->addr;
+      nvma->flags = vma->flags;
+      nvma->fp = filedup(vma->fp);
+      nvma->len = vma->len;
+      nvma->prot = vma->prot;
+    }
+  }
+
   // Copy user memory from parent to child.
   if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
     freeproc(np);
     release(&np->lock);
     return -1;
   }
+
   np->sz = p->sz;
 
   np->parent = p;
@@ -340,9 +356,36 @@ void
 exit(int status)
 {
   struct proc *p = myproc();
+  struct vma *vma;
+  uint64 addr, st, en;
+  int len, npages;
 
   if(p == initproc)
     panic("init exiting");
+
+  // unmap all mmap-ed regions  
+  for (int i = 0; i < 16; ++i) {
+    vma = &p->vmatable[i];
+    if (vma->alloc == 0)
+      continue;
+    addr = vma->addr;
+    len = vma->len;
+
+    // write data back to file if necessary
+    if ((vma->flags & MAP_SHARED) != 0)
+      filewrite(vma->fp, addr, len);
+
+    // either from start or end, unmap pages if necessary
+    st = addr == PGROUNDDOWN(addr) ? PGROUNDDOWN(addr) : PGROUNDUP(addr);
+    en = PGROUNDDOWN(addr + len) - PGSIZE;
+    npages = en > st? (en - st) / PGSIZE : 0;
+    if (npages > 0)
+      uvmunmap(proc->pagetable, st, npages, 1);
+
+    // free this vma
+    vma->alloc = 0;
+    fileclose(vma->fp);
+  }
 
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
@@ -351,7 +394,7 @@ exit(int status)
       fileclose(f);
       p->ofile[fd] = 0;
     }
-  }
+  } 
 
   begin_op();
   iput(p->cwd);

@@ -276,6 +276,7 @@ fork_test(void)
     err("fork");
   if (pid == 0) {
     _v1(p1);
+    printf("Child now\n");
     munmap(p1, PGSIZE); // just the first page
     exit(0); // tell the parent that the mapping looks OK.
   }

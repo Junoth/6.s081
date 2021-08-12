@@ -5,11 +5,23 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fcntl.h"
 
 struct spinlock tickslock;
 uint ticks;
 
 extern char trampoline[], uservec[], userret[];
+
+struct file {
+  enum { FD_NONE, FD_PIPE, FD_INODE, FD_DEVICE } type;
+  int ref; // reference count
+  char readable;
+  char writable;
+  struct pipe *pipe; // FD_PIPE
+  struct inode *ip;  // FD_INODE and FD_DEVICE
+  uint off;          // FD_INODE
+  short major;       // FD_DEVICE
+};
 
 // in kernelvec.S, calls kerneltrap().
 void kernelvec();
@@ -27,6 +39,50 @@ void
 trapinithart(void)
 {
   w_stvec((uint64)kernelvec);
+}
+
+int mmaptrap(void)
+{
+  // check if page in mmap-ed region
+  uint64 addr;
+  struct proc* proc;
+  addr = r_stval();
+  proc = myproc();
+  struct vma* vma;
+  for (int i = 0; i < 16; ++i) {
+    vma = &proc->vmatable[i];
+    if (vma->alloc) {
+      uint64 st, en;
+      int off, perm;
+      st = vma->addr;
+      en = vma->addr + vma->len;
+      if (st <= addr && en > addr) {
+        if (r_scause() == 15 && ((vma->prot & PROT_WRITE) == 0)) {
+          // check write permission 
+          return -1;
+        }
+        if (r_scause() == 13 && ((vma->prot & PROT_READ) == 0)) {
+          // check read permission
+          return -1;
+        }
+        addr = PGROUNDDOWN(addr);
+        // in mmap-ed range, alloc page
+        perm = vma->prot << 1;
+        uvmallocpage(proc->pagetable, addr, perm);
+
+        // read file content to page
+        st = addr > st? addr : st;
+        en = addr + PGSIZE < en? addr + PGSIZE : en; 
+        off = st - vma->addr;
+        ilock(vma->fp->ip);
+        readi(vma->fp->ip, 1, st, off, en - st); 
+        iunlock(vma->fp->ip);
+        return 0;
+      }
+    }
+  }
+
+  return -1;
 }
 
 //
@@ -67,6 +123,10 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if(r_scause() == 13 || r_scause() == 15) {
+    // page fault
+    if (mmaptrap() == -1)
+      p->killed = 1;
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());

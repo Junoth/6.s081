@@ -484,3 +484,130 @@ sys_pipe(void)
   }
   return 0;
 }
+
+uint64 
+sys_mmap(void)
+{
+  // we should fill in the pg table lazily
+  uint64 addr;
+  int len, prot, flags, fd, off;
+  struct proc *proc;
+  uint oldsz, newsz;
+  struct file *fp;
+
+  if((argaddr(0, &addr)) < 0) {
+    // just check if there is argument, we don't care about the value since we can assume
+    // the value is always 0
+    return -1;
+  }
+
+  if((argint(1, &len)) < 0) {
+    return -1;
+  }
+
+  if(argint(2, &prot) < 0) {
+    return -1;
+  }
+
+  if(argint(3, &flags) < 0) {
+    return -1;
+  }
+
+  if(argint(4, &fd) < 0) {
+    return -1;
+  }
+
+  if(argint(3, &off) < 0) {
+    return -1;
+  }
+
+  // update the uvm size of proc
+  proc = myproc();
+  oldsz = proc->sz;
+  if (oldsz + len >= MAXVA)
+    return -1;
+  newsz = oldsz + len;
+  proc->sz = newsz;
+
+  // alloc vma
+  for (int i = 0; i < 16; ++i) {
+    if (!proc->vmatable[i].alloc) {
+      // get file pointer and add ref
+      if ((fp = proc->ofile[fd]) == 0)
+        break;
+      filedup(fp);
+      proc->vmatable[i].fp = fp; 
+      if (fp->writable == 0) {
+        if (((flags & MAP_SHARED) != 0) && ((prot & PROT_WRITE) != 0)) {
+          fileclose(fp);
+          break;
+        }
+      }
+
+      // not alloc
+      proc->vmatable[i].addr = oldsz;
+      proc->vmatable[i].len = len;
+      proc->vmatable[i].prot = prot;
+      proc->vmatable[i].flags = flags;
+      proc->vmatable[i].alloc = 1;
+
+      return oldsz;
+    }
+  }
+
+  // all vma has been alloc
+  proc->sz = oldsz;
+  return -1;
+}
+
+uint64 
+sys_munmap(void)
+{
+  struct proc *proc;
+  struct vma *vma;
+  uint64 addr, st, en;
+  int len, npages;
+
+  if ((argaddr(0, &addr)) < 0) {
+    return -1;
+  }
+
+  if ((argint(1, &len)) < 0) {
+    return -1;
+  }
+
+  proc = myproc();
+  for (int i = 0; i < 16; ++i) {
+    vma = &proc->vmatable[i];
+    if (vma->alloc == 0)
+      continue;
+    st = vma->addr;
+    en = vma->addr + vma->len;
+    if (st == addr || en == addr + len) {
+      // update vma info
+      if (st == addr)
+        vma->addr = addr + len;
+      vma->len -= len; 
+
+      // write data back to file if necessary
+      if ((vma->flags & MAP_SHARED) != 0)
+        filewrite(vma->fp, addr, len);
+
+      // either from start or end, unmap pages if necessary
+      st = addr == PGROUNDDOWN(addr) ? PGROUNDDOWN(addr) : PGROUNDUP(addr);
+      en = PGROUNDDOWN(addr + len) - PGSIZE;
+      npages = en > st? (en - st) / PGSIZE : 0;
+      if (npages > 0) {
+        uvmunmap(proc->pagetable, st, npages, 1);
+      }
+
+      if (vma->len == 0) {
+        // free this vma
+        vma->alloc = 0;
+        fileclose(vma->fp);
+      }
+    }
+  } 
+
+  return 0;
+}
