@@ -95,13 +95,40 @@ e1000_init(uint32 *xregs)
 int
 e1000_transmit(struct mbuf *m)
 {
-  //
-  // Your code here.
-  //
-  // the mbuf contains an ethernet frame; program it into
-  // the TX descriptor ring so that the e1000 sends it. Stash
-  // a pointer so that it can be freed after sending.
-  //
+  struct tx_desc *txd;
+  uint tdt;
+
+  // acquire e1000 lock
+  acquire(&e1000_lock);
+
+  // fetch E1000_TDT reg
+  tdt = regs[E1000_TDT];
+
+  // check if ring is overflowing
+  txd = &tx_ring[tdt];
+  if (!(txd->status & E1000_TXD_STAT_DD)) {
+    release(&e1000_lock);
+    return -1;
+  }
+  
+  // free the last mbuf that was transmitted from that descriptor
+  if (tx_mbufs[tdt] != 0)
+    mbuffree(tx_mbufs[tdt]);
+  
+  // update descriptor
+  tx_mbufs[tdt] = m;
+  txd->addr = (uint64) m->head;
+  txd->length = m->len;
+  txd->cmd = E1000_TXD_CMD_RS;
+  if (!m->next)
+    txd->cmd |= E1000_TXD_CMD_EOP;
+  
+  // update ring position
+  regs[E1000_TDT] = (tdt + 1) % TX_RING_SIZE;
+
+  // release e1000 lock
+  release(&e1000_lock);
+
   
   return 0;
 }
@@ -109,12 +136,43 @@ e1000_transmit(struct mbuf *m)
 static void
 e1000_recv(void)
 {
-  //
-  // Your code here.
-  //
-  // Check for packets that have arrived from the e1000
-  // Create and deliver an mbuf for each packet (using net_rx()).
-  //
+  struct mbuf *m;
+  struct rx_desc *rxd;
+  uint32 rdt; 
+
+  for (;;) {
+    // acquire e1000 lock
+    acquire(&e1000_lock);
+
+    // Fetch E1000_RDT reg to get next waiting received packet
+    rdt = (regs[E1000_RDT] + 1) % RX_RING_SIZE;
+
+    // Check if new packet if available
+    rxd = &rx_ring[rdt]; 
+    if (!(rxd->status & E1000_RXD_STAT_DD)) {
+      release(&e1000_lock);
+      return;
+    }
+
+    // Update mbuf's len
+    m = rx_mbufs[rdt];
+    m->len = rxd->length;
+
+    // allocate a new mbuf and update descriptor's ptr
+    rx_mbufs[rdt] = mbufalloc(0); 
+    if (!rx_mbufs[rdt])
+      panic("e1000");
+    rxd->addr = (uint64) rx_mbufs[rdt]->head;
+    rxd->status = 0;
+
+    regs[E1000_RDT] = rdt; 
+
+    // release e1000 lock
+    release(&e1000_lock);
+
+    // deliver to network stack
+    net_rx(m);
+  }
 }
 
 void
